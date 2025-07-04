@@ -81,15 +81,15 @@ jobs:
             {"repo_name": "baz-backend", "app_name": "baz"}
           ]'
 
-          # Function to get matrix configuration for a repository
-          get_matrix_config() {
+          # Function to get all matrix configurations for a repository
+          get_matrix_configs() {
             local repo_name="$1"
             local deployment_type="$2"
             
             if [ "$deployment_type" = "frontend" ]; then
-              echo "$frontend_matrix" | jq -r ".[] | select(.\"repo_name\" == \"$repo_name\")"
+              echo "$frontend_matrix" | jq -r "[.[] | select(.\"repo_name\" == \"$repo_name\")]"
             elif [ "$deployment_type" = "backend" ]; then
-              echo "$backend_matrix" | jq -r ".[] | select(.\"repo_name\" == \"$repo_name\")"
+              echo "$backend_matrix" | jq -r "[.[] | select(.\"repo_name\" == \"$repo_name\")]"
             fi
           }
 
@@ -124,75 +124,85 @@ jobs:
 
             echo "Triggering $ENV deployment for $repo_name..."
 
-            # Get matrix configuration for the repository
-            matrix_config=$(get_matrix_config "$repo_name" "$deployment_type")
+            # Get all matrix configurations for the repository
+            matrix_configs=$(get_matrix_configs "$repo_name" "$deployment_type")
+            config_count=$(echo "$matrix_configs" | jq 'length')
 
-            # Extract values from matrix configuration
-            if [ -n "$matrix_config" ] && [ "$matrix_config" != "null" ]; then
-              app_name=$(echo "$matrix_config" | jq -r '.["app_name"]')
-            else
-              echo "Error: No matrix configuration found for $repo_name" >&2
+            if [ "$config_count" -eq 0 ]; then
+              echo "Error: No matrix configurations found for $repo_name" >&2
               exit 1
             fi
 
-            # Trigger appropriate deployment workflow based on type
-            curl -s -X POST \
-              -H "Authorization: Bearer $GH_TOKEN" \
-              -H "Accept: application/vnd.github.v3+json" \
-              "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/workflows/deploy.yml/dispatches" \
-              -d "{
-                \"ref\": \"$(git branch --show-current)\",
-                \"inputs\": {
-                  \"id\": \"$repo_deploy_id\",
-                  \"repo_name\": \"$repo_name\",
-                  \"app_name\": \"$app_name\",
-                  \"commit_hash\": \"$commit\",
-                  \"environment\": \"$ENV\",
-                  \"deployment_type\": \"$deployment_type\"
-                }
-              }"
+            echo "Found $config_count configurations for $repo_name"
 
-            # Pause to ensure workflow is registered
-            sleep 20
+            # Process each configuration sequentially
+            echo "$matrix_configs" | jq -c '.[]' | while read -r config; do
+              app_name=$(echo "$config" | jq -r '.["app_name"]')
+              unique_deploy_id="${repo_deploy_id}_${app_name}"
 
-            # Get workflow ID for the specific workflow
-            current_date=$(date -u +"%Y-%m-%d")         
-            run_id=$(curl -s \
+              echo "Triggering deployment for $repo_name/$app_name..."
+
+              # Trigger deployment workflow
+              curl -s -X POST \
                 -H "Authorization: Bearer $GH_TOKEN" \
                 -H "Accept: application/vnd.github.v3+json" \
-                "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/runs?created=%3E%3D${current_date}&event=workflow_dispatch" \
-                | jq -r ".workflow_runs[] | select(.name==\"$repo_deploy_id\") | .id")
+                "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/workflows/deploy.yml/dispatches" \
+                -d "{
+                  \"ref\": \"$(git branch --show-current)\",
+                  \"inputs\": {
+                    \"id\": \"$unique_deploy_id\",
+                    \"repo_name\": \"$repo_name\",
+                    \"app_name\": \"$app_name\",
+                    \"commit_hash\": \"$commit\",
+                    \"environment\": \"$ENV\",
+                    \"deployment_type\": \"$deployment_type\"
+                  }
+                }"
 
-            # Throw an error if run_id is undefined or empty
-            if [ -z "$run_id" ] || [ "$run_id" = "null" ]; then
-              echo "❌ Error: Failed to get run ID for $repo_name deployment. The workflow may not have started properly." >&2
-              exit 1
-            fi
+              # Pause to ensure workflow is registered
+              sleep 10
 
-            echo "Deployment triggered for $repo_name with run ID: $run_id"
+              # Get workflow ID
+              current_date=$(date -u +"%Y-%m-%d")
+              run_id=$(curl -s \
+                  -H "Authorization: Bearer $GH_TOKEN" \
+                  -H "Accept: application/vnd.github.v3+json" \
+                  "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/runs?created=%3E%3D${current_date}&event=workflow_dispatch" \
+                  | jq -r ".workflow_runs[] | select(.name==\"$unique_deploy_id\") | .id")
 
-            # Wait for workflow completion and check status
-            while true; do
-              run_info=$(curl -s \
-                -H "Authorization: Bearer $GH_TOKEN" \
-                -H "Accept: application/vnd.github.v3+json" \
-                "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/runs/$run_id")
-              
-              status=$(echo "$run_info" | jq -r '.status')
-              conclusion=$(echo "$run_info" | jq -r '.conclusion')
-              
-              if [ "$status" = "completed" ]; then
-                if [ "$conclusion" = "success" ]; then
-                  echo "✅ Deployment for $repo_name completed successfully!"
-                  break
-                else
-                  echo "❌ Deployment for $repo_name failed with status: $conclusion"
-                  exit 1
-                fi
+              if [ -z "$run_id" ] || [ "$run_id" = "null" ]; then
+                echo "❌ Error: Failed to get run ID for $repo_name/$app_name deployment" >&2
+                exit 1
               fi
 
-              echo "⏳ Waiting for $repo_name deployment to complete... Current status: $status"
-              sleep 10
+              echo "Deployment triggered for $repo_name/$app_name with run ID: $run_id"
+
+              # Wait for current deployment to complete before proceeding
+              while true; do
+                run_info=$(curl -s \
+                  -H "Authorization: Bearer $GH_TOKEN" \
+                  -H "Accept: application/vnd.github.v3+json" \
+                  "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/runs/$run_id")
+                
+                status=$(echo "$run_info" | jq -r '.status')
+                conclusion=$(echo "$run_info" | jq -r '.conclusion')
+                
+                if [ "$status" = "completed" ]; then
+                  if [ "$conclusion" = "success" ]; then
+                    echo "✅ Deployment for $repo_name/$app_name completed successfully!"
+                    break
+                  else
+                    echo "❌ Deployment for $repo_name/$app_name failed with status: $conclusion"
+                    exit 1
+                  fi
+                fi
+
+                echo "⏳ Waiting for $repo_name/$app_name deployment to complete... Current status: $status"
+                sleep 10
+              done
+
+              # Add delay between deployments
+              sleep 5
             done
           done
           

@@ -28,16 +28,15 @@ permissions:
   contents: read    # Required for checking out code
 
 jobs:
-  repositories:
+  repo-info:
     runs-on: ubuntu-latest
     steps:
       - run: |
-          info=$(echo '${{ inputs.repos }}' | jq -r '.[] | "\(.repo_name) \(.commit_hash)"')
-          echo "::notice::$info"
+           echo '${{ inputs.repos }}' | jq -r '.[] | "::notice::\(.repo_name) \(.commit_hash)"'
 
-  preprocess:
+  pre-deploy:
     runs-on: ubuntu-latest
-    needs: repositories
+    needs: repo-info
     environment:
       name: ${{ inputs.environment }}
     steps:
@@ -53,7 +52,7 @@ jobs:
       - name: Sort repos based on predefined order
         run: |
           # Define order map as an array
-          order='["baz-backend", "foo-frontend", "bar-frontend"]'
+          order='["baz-backend", "foo-frontend"]'
 
           # Sort repos.json based on the index in order map
           jq --argjson order "$order" '
@@ -73,13 +72,13 @@ jobs:
 
           # Matrix configuration for frontend deployments
           frontend_matrix='[
-            {"repo_name": "foo-frontend", "app_name": "foo-frontend"},
-            {"repo_name": "foo-frontend", "app_name": "bar-frontend"},
+            {"repo_name": "foo-frontend", "app_name": "foo"},
+            {"repo_name": "foo-frontend", "app_name": "bar"}
           ]'
 
           # Matrix configuration for backend deployments
           backend_matrix='[
-            {"repo_name": "baz-backend", "app_name": "baz-backend"},
+            {"repo_name": "baz-backend", "app_name": "baz"}
           ]'
 
           # Function to get matrix configuration for a repository
@@ -149,12 +148,12 @@ jobs:
                   \"app_name\": \"$app_name\",
                   \"commit_hash\": \"$commit\",
                   \"environment\": \"$ENV\",
-                  \"deployment_type\": \"$deployment_type\",
+                  \"deployment_type\": \"$deployment_type\"
                 }
               }"
 
             # Pause to ensure workflow is registered
-            sleep 10
+            sleep 20
 
             # Get workflow ID for the specific workflow
             current_date=$(date -u +"%Y-%m-%d")         
@@ -166,12 +165,12 @@ jobs:
 
             # Throw an error if run_id is undefined or empty
             if [ -z "$run_id" ] || [ "$run_id" = "null" ]; then
-              echo "❌ Error: Failed to get run ID for $name deployment. The workflow may not have started properly." >&2
+              echo "❌ Error: Failed to get run ID for $repo_name deployment. The workflow may not have started properly." >&2
               exit 1
             fi
 
-            echo "Deployment triggered for $name with run ID: $run_id"
-            
+            echo "Deployment triggered for $repo_name with run ID: $run_id"
+
             # Wait for workflow completion and check status
             while true; do
               run_info=$(curl -s \
@@ -184,15 +183,15 @@ jobs:
               
               if [ "$status" = "completed" ]; then
                 if [ "$conclusion" = "success" ]; then
-                  echo "✅ Deployment for $name completed successfully!"
+                  echo "✅ Deployment for $repo_name completed successfully!"
                   break
                 else
-                  echo "❌ Deployment for $name failed with status: $conclusion"
+                  echo "❌ Deployment for $repo_name failed with status: $conclusion"
                   exit 1
                 fi
               fi
-              
-              echo "⏳ Waiting for $name deployment to complete... Current status: $status"
+
+              echo "⏳ Waiting for $repo_name deployment to complete... Current status: $status"
               sleep 10
             done
           done
